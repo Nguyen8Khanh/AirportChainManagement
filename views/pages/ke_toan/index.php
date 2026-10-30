@@ -5,16 +5,32 @@ require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../controllers/KeToanController.php';
 $keToan = new KeToanController($conn);
 
-//2. Xử lý các hành động được gửi lên (PHP thuần: flash + redirect, không JS)
+//2. Xử lý các hành động được gửi lên
 $keToanUrl = 'index.php?page=ke_toan';
 
-//Xử lý thêm đơn giá mới
-if (isset($_POST['btn_them_gia'])) {
-    $ketQua = $keToan->ThemDonGia($_POST['ten_dich_vu'], $_POST['don_gia'], $_POST['don_vi_tinh']);
-    if ($ketQua === false) {
-        $_SESSION['flash_error'] = 'Không thêm được đơn giá. Vui lòng kiểm tra lại dữ liệu.';
+// Khởi tạo CSRF Token cho form sửa đơn giá
+if (empty($_SESSION['ke_toan_csrf'])) {
+    $_SESSION['ke_toan_csrf'] = bin2hex(random_bytes(32));
+}
+
+// Xử lý cập nhật đơn giá
+if (isset($_POST['btn_sua_gia'])) {
+    $id    = (int) ($_POST['id'] ?? 0);
+    $gia   = (float) ($_POST['don_gia'] ?? 0);
+    $donVi = trim((string) ($_POST['don_vi_tinh'] ?? ''));
+    $token = (string) ($_POST['csrf'] ?? '');
+    if (!hash_equals($_SESSION['ke_toan_csrf'], $token)) {
+        $_SESSION['flash_error'] = 'Phiên làm việc đã hết hạn. Vui lòng thử lại.';
+    } elseif ($id <= 0 || !$keToan->LayDonGia($id)) {
+        $_SESSION['flash_error'] = 'Không tìm thấy khoản phí cần sửa.';
+    } elseif ($gia <= 0) {
+        $_SESSION['flash_error'] = 'Đơn giá phải lớn hơn 0.';
+    } elseif ($donVi === '' || mb_strlen($donVi) > 50) {
+        $_SESSION['flash_error'] = 'Đơn vị tính không được để trống (tối đa 50 ký tự).';
+    } elseif ($keToan->CapNhatDonGia($id, $gia, $donVi)) {
+        $_SESSION['flash_success'] = 'Đã cập nhật đơn giá thành công!';
     } else {
-        $_SESSION['flash_success'] = 'Thêm đơn giá thành công!';
+        $_SESSION['flash_error'] = 'Không cập nhật được đơn giá. Vui lòng thử lại.';
     }
     header('Location: ' . $keToanUrl);
     exit();
@@ -23,7 +39,6 @@ if (isset($_POST['btn_them_gia'])) {
 // Xử lý phát hành hóa đơn tự động
 if (isset($_GET['tao_hoa_don']) && !empty($_GET['tao_hoa_don'])) {
     $ma_cb = (int) $_GET['tao_hoa_don'];
-
     if ($keToan->TinhVaTaoHoaDon($ma_cb)) {
         $_SESSION['flash_success'] = 'Đã tính toán và tạo hóa đơn thành công!';
     } else {
@@ -40,12 +55,9 @@ if (isset($_GET['thanh_toan_id'])) {
     header('Location: ' . $keToanUrl);
     exit();
 }
-
-// Lấy flash message (nếu có) rồi xóa để không hiện lại khi tải lại trang
 $flashSuccess = $_SESSION['flash_success'] ?? '';
 $flashError   = $_SESSION['flash_error'] ?? '';
 unset($_SESSION['flash_success'], $_SESSION['flash_error']);
-
 
 // 3. Lấy dữ liệu để hiển thị trên trang
 $danh_sach_gia = $keToan->DanhSachDonGia();
@@ -61,6 +73,13 @@ if ($san_bay_chon > 0) {
     $tong_khach_san_bay = $keToan->ThongKeHanhKhachSanBay($san_bay_chon);
 }
 
+// Lấy thông tin khoản phí đang sửa (nếu có)
+$giaDangSua = null;
+if (isset($_GET['sua'])) {
+    $giaDangSua = $keToan->LayDonGia((int) $_GET['sua']);
+}
+
+
 // 4. Cấu hình trang
 $pageTitle  = 'Kế toán & doanh thu';
 $pageHeader = 'Kế toán & doanh thu';
@@ -73,10 +92,14 @@ ob_start();
 ?>
 
 <?php if ($flashSuccess !== ''): ?>
-    <div class="alert alert-success" role="alert"><?= htmlspecialchars($flashSuccess, ENT_QUOTES, 'UTF-8') ?></div>
+    <div class="alert alert-success alert-dismissible fade show" role="alert">
+        <?= htmlspecialchars($flashSuccess, ENT_QUOTES, 'UTF-8') ?>
+    </div>
 <?php endif; ?>
 <?php if ($flashError !== ''): ?>
-    <div class="alert alert-danger" role="alert"><?= htmlspecialchars($flashError, ENT_QUOTES, 'UTF-8') ?></div>
+    <div class="alert alert-danger alert-dismissible fade show" role="alert">
+        <?= htmlspecialchars($flashError, ENT_QUOTES, 'UTF-8') ?>
+    </div>
 <?php endif; ?>
 
 <!--PHẦN 1: THỐNG KÊ NHANH-->
@@ -91,7 +114,7 @@ ob_start();
             <i class="small-box-icon bi bi-graph-up-arrow"></i>
         </div>
     </div>
-    
+
     <!--Hóa đơn đã thu-->
     <div class="col">
         <div class="small-box text-bg-success">
@@ -136,44 +159,68 @@ ob_start();
         </div>
     </div>
 </div>
-
 <div class="row">
+
     <!--PHẦN 2: QUẢN LÝ BIỂU PHÍ-->
-    <div class="col-md-4">
+    <div class="col-md-5">
         <div class="card card-primary card-outline">
             <div class="card-header">
                 <h3 class="card-title">Biểu phí dịch vụ</h3>
             </div>
             <div class="card-body">
-                <form method="POST">
-                    <div class="mb-2">
-                        <input type="text" name="ten_dich_vu" class="form-control form-control-sm" 
-                        placeholder="Tên phí (VD: Phí hạ cánh)" required>
-                    </div>
-                    <div class="mb-2">
-                        <input type="number" name="don_gia" class="form-control form-control-sm" 
-                        placeholder="Đơn giá (VNĐ)" required>
-                    </div>
-                    <div class="mb-2">
-                        <input type="text" name="don_vi_tinh" class="form-control form-control-sm" 
-                        placeholder="Đơn vị (VD: VNĐ/Tấn)" required>
-                    </div>
-                    <button type="submit" name="btn_them_gia" class="btn btn-sm btn-primary w-100">Thêm đơn giá</button>
-                </form>
+                <?php if ($giaDangSua): ?>
+                    <form method="post" action="index.php?page=ke_toan">
+                        <input type="hidden" name="csrf" value="<?= htmlspecialchars($_SESSION['ke_toan_csrf'], ENT_QUOTES, 'UTF-8') ?>" />
+                        <input type="hidden" name="id" value="<?= (int) $giaDangSua['id'] ?>" />
+                        <div class="mb-2">
+                            <label class="form-label small mb-1 fw-bold">Khoản phí</label>
+                            <input type="text" class="form-control form-control-sm" disabled
+                                   value="<?= htmlspecialchars($nhanPhi[$giaDangSua['loai_dich_vu']] ?? $giaDangSua['loai_dich_vu'], ENT_QUOTES, 'UTF-8') ?>" />
+                            <div class="form-text">Mã kỹ thuật: <?= htmlspecialchars($giaDangSua['loai_dich_vu'], ENT_QUOTES, 'UTF-8') ?> (không đổi)</div>
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small mb-1 fw-bold">Đơn giá (VNĐ)</label>
+                            <input type="number" min="0.01" step="0.01" name="don_gia"
+                                   class="form-control form-control-sm" required
+                                   value="<?= htmlspecialchars((string) $giaDangSua['don_gia'], ENT_QUOTES, 'UTF-8') ?>" />
+                        </div>
+                        <div class="mb-2">
+                            <label class="form-label small mb-1 fw-bold">Đơn vị tính</label>
+                            <input type="text" maxlength="50" name="don_vi_tinh"
+                                   class="form-control form-control-sm" required
+                                   value="<?= htmlspecialchars($giaDangSua['don_vi_tinh'], ENT_QUOTES, 'UTF-8') ?>" />
+                        </div>
+                        <div class="d-flex gap-2 mt-3">
+                            <button type="submit" name="btn_sua_gia" class="btn btn-sm btn-primary flex-fill">Lưu thay đổi</button>
+                            <a href="index.php?page=ke_toan" class="btn btn-sm btn-light border">Hủy</a>
+                        </div>
+                    </form>
+                <?php elseif (isset($_GET['sua'])): ?>
+                    <div class="alert alert-warning mb-3">Không tìm thấy khoản phí cần sửa.</div>
+                <?php else: ?>
+                    <p class="text-muted small mb-3">Bấm <strong>Sửa</strong> ở bảng bên dưới để cập nhật đơn giá.</p>
+                <?php endif; ?>
                 <hr>
-                <table class="table table-sm table-bordered">
+                <table class="table table-sm table-bordered align-middle mb-0">
                     <thead>
                         <tr>
                             <th>Tên phí</th>
                             <th>Đơn giá</th>
+                            <th class="text-end">Thao tác</th>
                         </tr>
                     </thead>
                     <tbody>
                         <?php foreach ($danh_sach_gia as $gia): ?>
                         <tr>
-                            <td><?= htmlspecialchars($gia['loai_dich_vu']) ?></td>
-                            <td><?= number_format($gia['don_gia']) ?> <br><small class="text-muted">
-                                <?= htmlspecialchars($gia['don_vi_tinh']) ?></small></td>
+                            <td><?= htmlspecialchars($nhanPhi[$gia['loai_dich_vu']] ?? $gia['loai_dich_vu'], ENT_QUOTES, 'UTF-8') ?></td>
+                            <td>
+                                <?= number_format($gia['don_gia']) ?>
+                                <br><small class="text-muted"><?= htmlspecialchars($gia['don_vi_tinh'], ENT_QUOTES, 'UTF-8') ?></small>
+                            </td>
+                            <td class="text-end">
+                                <a href="index.php?page=ke_toan&sua=<?= (int) $gia['id'] ?>"
+                                   class="btn btn-sm btn-outline-primary">Sửa</a>
+                            </td>
                         </tr>
                         <?php endforeach; ?>
                     </tbody>
@@ -183,7 +230,7 @@ ob_start();
     </div>
 
     <!--PHẦN 3: DANH SÁCH CHUYẾN BAY-->
-    <div class="col-md-8">
+    <div class="col-md-7">
         <div class="card">
             <div class="card-header">
                 <h3 class="card-title">Chuyến bay đã hoàn thành (Chờ lập hóa đơn)</h3>

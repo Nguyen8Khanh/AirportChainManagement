@@ -19,6 +19,29 @@ class KeToanController {
         }
         return $data;
     }
+// Lấy một dòng đơn giá theo id
+    public function LayDonGia($id) {
+        $id = (int) $id;
+        $stmt = mysqli_prepare($this->conn, "SELECT * FROM bang_gia_dich_vu WHERE id = ?");
+        if (!$stmt) return null;
+        mysqli_stmt_bind_param($stmt, 'i', $id);
+        mysqli_stmt_execute($stmt);
+        $result = mysqli_stmt_get_result($stmt);
+        $row = $result ? mysqli_fetch_assoc($result) : null;
+        mysqli_stmt_close($stmt);
+        return $row ?: null;
+    }
+
+// Cập nhật đơn giá + đơn vị tính
+    public function CapNhatDonGia($id, $gia, $donVi) {
+        $id = (int) $id;
+        $stmt = mysqli_prepare($this->conn, "UPDATE bang_gia_dich_vu SET don_gia = ?, don_vi_tinh = ? WHERE id = ?");
+        if (!$stmt) return false;
+        mysqli_stmt_bind_param($stmt, 'dsi', $gia, $donVi, $id);
+        $ok = mysqli_stmt_execute($stmt);
+        mysqli_stmt_close($stmt);
+        return $ok;
+}
 
 // Thêm đơn giá mới
     public function ThemDonGia($ten, $gia, $don_vi) {
