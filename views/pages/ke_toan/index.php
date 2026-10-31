@@ -5,7 +5,7 @@ require_once __DIR__ . '/../../../config/database.php';
 require_once __DIR__ . '/../../../controllers/KeToanController.php';
 $keToan = new KeToanController($conn);
 
-//2. Xử lý các hành động được gửi lên
+//2. Xử lý các hành động được gửi lên (PHP thuần: flash + redirect, không JS)
 $keToanUrl = 'index.php?page=ke_toan';
 
 // Khởi tạo CSRF Token cho form sửa đơn giá
@@ -13,12 +13,13 @@ if (empty($_SESSION['ke_toan_csrf'])) {
     $_SESSION['ke_toan_csrf'] = bin2hex(random_bytes(32));
 }
 
-// Xử lý cập nhật đơn giá
+// Xử lý cập nhật đơn giá (Sửa)
 if (isset($_POST['btn_sua_gia'])) {
     $id    = (int) ($_POST['id'] ?? 0);
     $gia   = (float) ($_POST['don_gia'] ?? 0);
     $donVi = trim((string) ($_POST['don_vi_tinh'] ?? ''));
     $token = (string) ($_POST['csrf'] ?? '');
+
     if (!hash_equals($_SESSION['ke_toan_csrf'], $token)) {
         $_SESSION['flash_error'] = 'Phiên làm việc đã hết hạn. Vui lòng thử lại.';
     } elseif ($id <= 0 || !$keToan->LayDonGia($id)) {
@@ -39,6 +40,7 @@ if (isset($_POST['btn_sua_gia'])) {
 // Xử lý phát hành hóa đơn tự động
 if (isset($_GET['tao_hoa_don']) && !empty($_GET['tao_hoa_don'])) {
     $ma_cb = (int) $_GET['tao_hoa_don'];
+
     if ($keToan->TinhVaTaoHoaDon($ma_cb)) {
         $_SESSION['flash_success'] = 'Đã tính toán và tạo hóa đơn thành công!';
     } else {
@@ -55,6 +57,8 @@ if (isset($_GET['thanh_toan_id'])) {
     header('Location: ' . $keToanUrl);
     exit();
 }
+
+// Lấy flash message (nếu có) rồi xóa để không hiện lại khi tải lại trang
 $flashSuccess = $_SESSION['flash_success'] ?? '';
 $flashError   = $_SESSION['flash_error'] ?? '';
 unset($_SESSION['flash_success'], $_SESSION['flash_error']);
@@ -79,6 +83,12 @@ if (isset($_GET['sua'])) {
     $giaDangSua = $keToan->LayDonGia((int) $_GET['sua']);
 }
 
+// Nhãn tiếng Việt cho 3 khoản phí
+$nhanPhi = [
+    'Phi_Cat_Ha_Canh'        => 'Phí cất hạ cánh',
+    'Phi_Do_Tau_Bay'         => 'Phí đỗ tàu bay',
+    'Phi_Phuc_Vu_Hanh_Khach' => 'Phí phục vụ hành khách',
+];
 
 // 4. Cấu hình trang
 $pageTitle  = 'Kế toán & doanh thu';
@@ -114,7 +124,7 @@ ob_start();
             <i class="small-box-icon bi bi-graph-up-arrow"></i>
         </div>
     </div>
-
+    
     <!--Hóa đơn đã thu-->
     <div class="col">
         <div class="small-box text-bg-success">
@@ -159,8 +169,8 @@ ob_start();
         </div>
     </div>
 </div>
-<div class="row">
 
+<div class="row">
     <!--PHẦN 2: QUẢN LÝ BIỂU PHÍ-->
     <div class="col-md-5">
         <div class="card card-primary card-outline">
@@ -301,6 +311,13 @@ ob_start();
                             <td class="text-danger fw-bold"><?= number_format($hd['tong_tien']) ?> VNĐ</td>
                             <td><?= date('d/m/Y', strtotime($hd['han_thanh_toan'])) ?></td>
                             <td class="text-end">
+                                <!-- Nút Xem chi tiết -->
+                                <button type="button" class="btn btn-sm btn-outline-info" 
+                                        data-bs-toggle="modal" 
+                                        data-bs-target="#modalChiTiet"
+                                        data-id="<?= $hd['id'] ?>">
+                                    <i class="bi bi-eye"></i> Xem
+                                </button>
                                 <a href="index.php?page=ke_toan&thanh_toan_id=<?= $hd['id'] ?>" 
                                    class="btn btn-sm btn-outline-success">
                                    Xác nhận thu tiền
@@ -423,6 +440,115 @@ ob_start();
     </div>
 </div>
 
+<!--Model chi tiết hóa đơn-->
+<div class="modal fade" id="modalChiTiet" tabindex="-1" aria-labelledby="modalChiTietLabel" aria-hidden="true">
+    <div class="modal-dialog modal-lg modal-dialog-centered">
+        <div class="modal-content">
+            <div class="modal-header bg-info text-white">
+                <h5 class="modal-title" id="modalChiTietLabel"><i class="bi bi-receipt"></i> Chi tiết hóa đơn</h5>
+                <button type="button" class="btn-close" data-bs-dismiss="modal" aria-label="Close"></button>
+            </div>
+            <div class="modal-body">
+                <div id="loading-spinner" class="text-center py-4">
+                    <div class="spinner-border text-primary" role="status"></div>
+                    <p class="mt-2">Đang tải dữ liệu...</p>
+                </div>
+                <div id="chi-tiet-content" style="display: none;">
+                    <table class="table table-sm table-borderless mb-4">
+                        <tr>
+                            <th style="width: 30%;">Mã hóa đơn:</th>
+                            <td class="fw-bold text-danger" id="ct-id">#</td>
+                        </tr>
+                        <tr>
+                            <th>Chuyến bay:</th>
+                            <td class="fw-bold" id="ct-chuyen-bay"></td>
+                        </tr>
+                        <tr>
+                            <th>Hãng hàng không:</th>
+                            <td id="ct-hang-bay"></td>
+                        </tr>
+                        <tr>
+                            <th>Ngày lập:</th>
+                            <td id="ct-ngay-lap"></td>
+                        </tr>
+                    </table>
+                    <h6 class="fw-bold border-bottom pb-2">Chi tiết các khoản phí</h6>
+                    <table class="table table-bordered table-striped align-middle">
+                        <thead class="table-light">
+                            <tr>
+                                <th>Khoản phí</th>
+                                <th class="text-center">Cách tính</th>
+                                <th class="text-end">Thành tiền (VNĐ)</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            <tr>
+                                <td>Phí cất/hạ cánh</td>
+                                <td class="text-center" id="ct-mtow"></td>
+                                <td class="text-end" id="ct-phi-cat-ha-canh"></td>
+                            </tr>
+                            <tr>
+                                <td>Phí đỗ tàu bay</td>
+                                <td class="text-center">Theo thời gian đỗ</td>
+                                <td class="text-end" id="ct-phi-do"></td>
+                            </tr>
+                            <tr>
+                                <td>Phí phục vụ hành khách</td>
+                                <td class="text-center" id="ct-so-khach"></td>
+                                <td class="text-end" id="ct-phi-psc"></td>
+                            </tr>
+                        </tbody>
+                        <tfoot>
+                            <tr class="table-warning">
+                                <th colspan="2" class="text-end fs-5">TỔNG CỘNG:</th>
+                                <th class="text-end fs-5 text-danger" id="ct-tong-tien"></th>
+                            </tr>
+                        </tfoot>
+                    </table>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Đóng</button>
+            </div>
+        </div>
+    </div>
+</div>
+<script>
+document.addEventListener('DOMContentLoaded', function () {
+    var modalChiTiet = document.getElementById('modalChiTiet');
+    if (modalChiTiet) {
+        modalChiTiet.addEventListener('show.bs.modal', function (event) {
+            var button = event.relatedTarget;
+            var idHoaDon = button.getAttribute('data-id');
+            document.getElementById('loading-spinner').style.display = 'block';
+            document.getElementById('chi-tiet-content').style.display = 'none';
+            fetch('views/pages/ke_toan/api_chi_tiet_hoa_don.php?id=' + idHoaDon)
+                .then(response => response.json())
+                .then(res => {
+                    if (res.status === 'success') {
+                        var d = res.data;
+                        document.getElementById('ct-id').innerText = '#' + d.id;
+                        document.getElementById('ct-chuyen-bay').innerText = d.so_hieu;
+                        document.getElementById('ct-hang-bay').innerText = d.ten_hang;
+                        document.getElementById('ct-ngay-lap').innerText = new Date(d.ngay_xuat).toLocaleString('vi-VN');
+                        document.getElementById('ct-mtow').innerText = d.tai_trong_cat_canh_mtow + ' Tấn';
+                        document.getElementById('ct-phi-cat-ha-canh').innerText = Number(d.phi_cat_ha_canh).toLocaleString('vi-VN');
+                        document.getElementById('ct-phi-do').innerText = Number(d.phi_do_tau_bay).toLocaleString('vi-VN');
+                        document.getElementById('ct-so-khach').innerText = d.luong_hanh_khach + ' khách';
+                        document.getElementById('ct-phi-psc').innerText = Number(d.phi_phuc_vu_hk).toLocaleString('vi-VN');
+                        document.getElementById('ct-tong-tien').innerText = Number(d.tong_tien).toLocaleString('vi-VN') + ' VNĐ';
+                        document.getElementById('loading-spinner').style.display = 'none';
+                        document.getElementById('chi-tiet-content').style.display = 'block';
+                    }
+                })
+                .catch(error => {
+                    alert("Có lỗi xảy ra khi tải dữ liệu!");
+                    console.error(error);
+                });
+        });
+    }
+});
+</script>
 <?php
 $content = ob_get_clean();
 require __DIR__ . '/../../layouts/main.php';
